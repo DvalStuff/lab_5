@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>GPS</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #1e1e2f;
+            color: #ffcc00;
+        }
+        header {
+            background-color: #27293d;
+            padding: 20px;
+            text-align: center;
+        }
+        #plot {
+            width: 80%;
+            height: 600px;
+            margin: 20px auto;
+            background-color: #27293d;
+            border-radius: 10px;
+        }
+        #config-form {
+            width: 80%;
+            margin: 20px auto;
+            background-color: #2e2e3e;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        #config-form h3 {
+            margin-top: 0;
+            color: #ffcc00;
+        }
+        #config-form label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #ffcc00;
+        }
+        #config-form input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 15px;
+            border-radius: 4px;
+            border: none;
+            background-color: #3b3b4f;
+            color: #ffffff;
+        }
+        #config-form button {
+            background-color: #ffcc00;
+            color: #1e1e2f;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        #config-form button:hover {
+            background-color: #e6b800;
+        }
+        @media (max-width: 768px) {
+            #plot, #config-form {
+                width: 95%;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Візуалізація вимірювань GPS</h1>
+</header>
+
+<div id="plot"></div>
+
+<div id="config-form">
+    <h3>Налаштування GPS</h3>
+    <label for="satelliteSpeed">Швидкість супутника (км/год):</label>
+    <input type="number" id="satelliteSpeed" value="10000">
+
+    <label for="objectSpeed">Швидкість об'єкта (км/год):</label>
+    <input type="number" id="objectSpeed" value="1000">
+
+    <button onclick="updateGPSConfig()">Оновити налаштування</button>
+</div>
+
+<script>
+    let socket;
+
+    function connectWebSocket() {
+        socket = new WebSocket('ws://localhost:4001');
+
+        socket.onopen = () => {
+            console.log('Підключено до WebSocket сервера');
+        };
+
+        socket.onmessage = (event) => {
+            console.log('Отримані дані:', event.data);
+            handleGPSData(event.data);
+        };
+
+        socket.onclose = () => {
+            console.log('З\'єднання закрито. Перепідключення через 3 секунди...');
+            setTimeout(connectWebSocket, 3000);
+        };
+
+        socket.onerror = (error) => {
+            console.error('Помилка WebSocket:', error);
+        };
+    }
+
+    connectWebSocket();
+
+    let satelliteData = {};
+    let satellitePositions = [];
+    let distances = [];
+    let objectPosition = { x: 0, y: 0 };
+
+    const layout = {
+        xaxis: { title: 'X координата (км)', range: [-200, 200], gridcolor: '#44475a', tickfont: { color: '#ffffff' } },
+        yaxis: { title: 'Y координата (км)', range: [-200, 200], gridcolor: '#44475a', tickfont: { color: '#ffffff' } },
+        plot_bgcolor: '#27293d',
+        paper_bgcolor: '#1e1e2f',
+        margin: { t: 50, r: 50, b: 50, l: 50 },
+        showlegend: true,
+        legend: { font: { color: '#ffffff' } }
+    };
+
+    function initPlot() {
+        const data = [
+            { x: [objectPosition.x], y: [objectPosition.y], mode: 'markers', marker: { size: 12, color: 'blue' }, name: 'Об\'єкт' },
+            { x: [], y: [], mode: 'markers', marker: { size: 8, color: 'red' }, name: 'Супутники' }
+        ];
+        Plotly.newPlot('plot', data, layout);
+    }
+
+    initPlot();
+
+    function handleGPSData(data) {
+        const message = JSON.parse(data);
+        console.log('Розпарсені дані:', message);
+
+        const { id, x, y, sentAt, receivedAt } = message;
+        const signalTravelTime = (receivedAt - sentAt) / 1000;
+        const signalSpeed = 300000;
+        const distance = signalTravelTime * signalSpeed;
+        const currentTime = Date.now();
+
+        satelliteData[id] = { x, y, distance, lastUpdated: currentTime };
+
+        cleanOldSatelliteData();
+        updateSatellitePositions();
+
+        if (Object.keys(satelliteData).length >= 3) {
+            calculateObjectPosition();
+        }
+
+        updatePlot();
+    }
+
+    function updateSatellitePositions() {
+        satellitePositions = [];
+        distances = [];
+
+        for (const id in satelliteData) {
+            const sat = satelliteData[id];
+            satellitePositions.push({ x: sat.x, y: sat.y });
+            distances.push(sat.distance);
+        }
+    }
+
+    function cleanOldSatelliteData() {
+        const currentTime = Date.now();
+        for (const id in satelliteData) {
+            if (currentTime - satelliteData[id].lastUpdated > 2000) {
+                delete satelliteData[id];
+                console.log(`Видалено застарілі дані супутника з ID ${id}`);
+            }
+        }
+    }
+
+    function calculateObjectPosition() {
+    const sats = Object.values(satelliteData).slice(0, 3);
+    if (sats.length < 3) {
+        console.error('Не хватает данных для расчёта положения объекта');
+        return;
+    }
+
+    const [satA, satB, satC] = sats;
+    const { x: x1, y: y1, distance: r1 } = satA;
+    const { x: x2, y: y2, distance: r2 } = satB;
+    const { x: x3, y: y3, distance: r3 } = satC;
+
+    const A = 2 * (x2 - x1);
+    const B = 2 * (y2 - y1);
+    const C = r1 ** 2 - r2 ** 2 - x1 ** 2 + x2 ** 2 - y1 ** 2 + y2 ** 2;
+
+    const D = 2 * (x3 - x2);
+    const E = 2 * (y3 - y2);
+    const F = r2 ** 2 - r3 ** 2 - x2 ** 2 + x3 ** 2 - y2 ** 2 + y3 ** 2;
+
+    const denominator = A * E - B * D;
+    if (denominator === 0) {
+        console.error('Невозможно вычислить положение объекта: деление на ноль');
+        return;
+    }
+
+    const x = (C * E - B * F) / denominator;
+    const y = (A * F - C * D) / denominator;
+
+    objectPosition = { x, y };
+    console.log('Новое положение объекта:', objectPosition);
+}
+
+    function updatePlot() {
+        const satelliteTrace = {
+            x: satellitePositions.map(pos => pos.x),
+            y: satellitePositions.map(pos => pos.y),
+            mode: 'markers',
+            marker: { size: 8, color: 'red' },
+            name: 'Супутники'
+        };
+
+        const objectTrace = {
+            x: [objectPosition.x],
+            y: [objectPosition.y],
+            mode: 'markers',
+            marker: { size: 12, color: 'blue' },
+            name: 'Об\'єкт'
+        };
+
+        Plotly.react('plot', [objectTrace, satelliteTrace], layout);
+    }
+
+    function updateGPSConfig() {
+        const satelliteSpeed = document.getElementById('satelliteSpeed').value;
+        const objectSpeed = document.getElementById('objectSpeed').value;
+
+        const configData = { satelliteSpeed: parseInt(satelliteSpeed), objectSpeed: parseInt(objectSpeed) };
+
+        fetch('http://localhost:4001/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(configData)
+        })
+        .then(response => {
+            if (!response.ok) throw new Error('HTTP error: ' + response.status);
+            return response.json();
+        })
+        .then(data => {
+            console.log('Ответ сервера:', data);
+            alert('Налаштування оновлено успішно!');
+            connectWebSocket();
+        })
+        .catch(error => {
+            console.error('Ошибка обновления настроек:', error);
+            alert('Ошибка обновления настроек. Проверьте консоль.');
+        });
+    }
+</script>
+
+</body>
+</html>
